@@ -4,7 +4,10 @@
 
 package protocol
 
-import "bytes"
+import (
+	"bytes"
+	"context"
+)
 
 // 9P2000 message types
 const (
@@ -152,7 +155,7 @@ type Dir struct {
 	ModUser string // name of the last user that modified the file
 }
 
-type Dispatcher func(s *Server, b *bytes.Buffer, t MType) error
+type Dispatcher func(ctx context.Context, s *Server, b *bytes.Buffer, t MType) error
 
 // N.B. In all packets, the wire order is assumed to be the order in which you
 // put struct members.
@@ -295,18 +298,18 @@ type NetListenerOpt func(*NetListener) error
 type Tracer func(string, ...interface{})
 
 type NineServer interface {
-	Rversion(MaxSize, string) (MaxSize, string, error)
-	Rattach(FID, FID, string, string) (QID, error)
-	Rwalk(FID, FID, []string) ([]QID, error)
-	Ropen(FID, Mode) (QID, MaxSize, error)
-	Rcreate(FID, string, Perm, Mode) (QID, MaxSize, error)
-	Rstat(FID) ([]byte, error)
-	Rwstat(FID, []byte) error
-	Rclunk(FID) error
-	Rremove(FID) error
-	Rread(FID, Offset, Count) ([]byte, error)
-	Rwrite(FID, Offset, []byte) (Count, error)
-	Rflush(Otag Tag) error
+	Rversion(context.Context, MaxSize, string) (MaxSize, string, error)
+	Rattach(context.Context, FID, FID, string, string) (QID, error)
+	Rwalk(context.Context, FID, FID, []string) ([]QID, error)
+	Ropen(context.Context, FID, Mode) (QID, MaxSize, error)
+	Rcreate(context.Context, FID, string, Perm, Mode) (QID, MaxSize, error)
+	Rstat(context.Context, FID) ([]byte, error)
+	Rwstat(context.Context, FID, []byte) error
+	Rclunk(context.Context, FID) error
+	Rremove(context.Context, FID) error
+	Rread(context.Context, FID, Offset, Count) ([]byte, error)
+	Rwrite(context.Context, FID, Offset, []byte) (Count, error)
+	Rflush(context.Context,  Tag) error
 }
 
 var (

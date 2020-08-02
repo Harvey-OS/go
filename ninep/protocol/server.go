@@ -8,11 +8,15 @@ package protocol
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
+
+	"github.com/opentracing/opentracing-go"
 )
 
 const DefaultAddr = ":5640"
@@ -33,6 +37,8 @@ type NetListener struct {
 	mu sync.Mutex
 
 	listeners map[net.Listener]struct{}
+
+	tracer opentracing.Tracer
 }
 
 // Server is a 9p server.
@@ -67,6 +73,10 @@ type conn struct {
 	dead bool
 
 	logger func(string, ...interface{})
+
+	span opentracing.Span
+
+	requestCounter uint64
 }
 
 // this is getting icky, but the plan is to deprecate this whole thing in favor of p9.
@@ -78,7 +88,11 @@ func NewNetListener(nsCreator NsCreator, opts ...NetListenerOpt) (*NetListener, 
 	l := &NetListener{
 		nsCreator: nsCreator,
 	}
-
+	if opentracing.IsGlobalTracerRegistered() {
+		l.tracer = opentracing.GlobalTracer()
+	} else {
+		l.tracer = opentracing.NoopTracer{}
+	}
 	for _, o := range opts {
 		if err := o(l); err != nil {
 			return nil, err
@@ -101,6 +115,7 @@ func (l *NetListener) newConn(rwc net.Conn) (*conn, error) {
 		replies:    make(chan RPCReply, NumTags),
 		remoteAddr: rwc.RemoteAddr().String(),
 		logger:     l.logf,
+		span:       l.tracer.StartSpan("newConn"),
 	}
 
 	return c, nil
@@ -109,7 +124,11 @@ func (l *NetListener) newConn(rwc net.Conn) (*conn, error) {
 // ServeFromRWC runs a server from an io.ReadWriteCloser
 // This can be used on Plan 9 for files in #s (i.e. /srv)
 func ServeFromRWC(rwc io.ReadWriteCloser, fs NineServer, n string) {
-
+	var tracer opentracing.Tracer
+	tracer = opentracing.NoopTracer{}
+	if opentracing.IsGlobalTracerRegistered() {
+		tracer = opentracing.GlobalTracer()
+	}
 	c := &conn{
 		server:     &Server{NS: fs, D: Dispatch},
 		Reader:     rwc,
@@ -118,6 +137,7 @@ func ServeFromRWC(rwc io.ReadWriteCloser, fs NineServer, n string) {
 		replies:    make(chan RPCReply, NumTags),
 		remoteAddr: n,
 		logger:     Debug,
+		span:       tracer.StartSpan("ServeFromRWC"),
 	}
 
 	c.serve()
@@ -232,11 +252,19 @@ func (c *conn) logf(format string, args ...interface{}) {
 }
 
 func (c *conn) serve() {
+	ctx, cancel := context.WithCancel(context.Background())
 	defer c.Close()
-
+	defer cancel()
 	c.logf("Starting readNetPackets")
-
+	sp := c.span.Tracer().StartSpan(
+		"connection",
+		opentracing.ChildOf(c.span.Context()),
+	)
+	defer sp.Finish()
+	defer c.span.Finish()
 	for !c.dead {
+		reqID := atomic.AddUint64(&c.requestCounter, 1)
+		st := time.Now()
 		l := make([]byte, 7)
 		if n, err := c.Read(l); err != nil || n < 7 {
 			c.logf("readNetPackets: short read: %v", err)
@@ -245,7 +273,19 @@ func (c *conn) serve() {
 		}
 		sz := int64(l[0]) + int64(l[1])<<8 + int64(l[2])<<16 + int64(l[3])<<24
 		t := MType(l[4])
+		tag := uint16(l[5]) | uint16(l[6])<<8
+
+		reqSpan := c.span.Tracer().StartSpan(
+			fmt.Sprintf(fmt.Sprintf("%d", tag)),
+			opentracing.ChildOf(sp.Context()),
+			opentracing.Tag{"tag", tag},
+			opentracing.Tag{"op", RPCNames[MType(l[4])]},
+			opentracing.Tag{"requestID", reqID},
+			opentracing.StartTime(st),
+		)
+
 		b := bytes.NewBuffer(l[5:])
+
 		r := io.LimitReader(c.Reader, sz-7)
 		if _, err := io.Copy(b, r); err != nil {
 			c.logf("readNetPackets: short read: %v", err)
@@ -253,19 +293,27 @@ func (c *conn) serve() {
 			return
 		}
 		c.logf("readNetPackets: got %v, len %d, sending to IO", RPCNames[MType(l[4])], b.Len())
-		//panic(fmt.Sprintf("packet is %v", b.Bytes()[:]))
-		//panic(fmt.Sprintf("s is %v", s))
-		if err := c.server.D(c.server, b, t); err != nil {
+		c.span.Tracer().StartSpan("read", opentracing.ChildOf(reqSpan.Context()), opentracing.StartTime(st)).Finish()
+
+		if err := c.server.D(opentracing.ContextWithSpan(ctx, reqSpan), c.server, b, t); err != nil {
 			c.logf("%v: %v", RPCNames[MType(l[4])], err)
 		}
+
 		c.logf("readNetPackets: Write %v back", b)
+
+		writeSpan := c.span.Tracer().StartSpan("write", opentracing.ChildOf(reqSpan.Context()))
 		amt, err := c.Write(b.Bytes())
+		writeSpan.Finish()
+
 		if err != nil {
 			c.logf("readNetPackets: write error: %v", err)
 			c.dead = true
+			reqSpan.Finish()
+			sp.Finish()
 			return
 		}
 		c.logf("Returned %v amt %v", b, amt)
+		reqSpan.Finish()
 	}
 }
 
@@ -274,7 +322,7 @@ func (c *conn) serve() {
 // We could do this with interface assertions and such a la rsc/fuse
 // but most people I talked do disliked that. So we don't. If you want
 // to make things optional, just define the ones you want to implement in this case.
-func Dispatch(s *Server, b *bytes.Buffer, t MType) error {
+func Dispatch(ctx context.Context, s *Server, b *bytes.Buffer, t MType) error {
 	switch t {
 	case Tversion:
 		s.Versioned = true
@@ -287,32 +335,33 @@ func Dispatch(s *Server, b *bytes.Buffer, t MType) error {
 			return fmt.Errorf("Dispatch: %v not allowed before Tversion", RPCNames[t])
 		}
 	}
-
+	rpcSpan, ctx := opentracing.StartSpanFromContext(ctx, RPCNames[t])
+	defer rpcSpan.Finish()
 	switch t {
 	case Tversion:
-		return s.SrvRversion(b)
+		return s.SrvRversion(ctx, b)
 	case Tattach:
-		return s.SrvRattach(b)
+		return s.SrvRattach(ctx, b)
 	case Tflush:
-		return s.SrvRflush(b)
+		return s.SrvRflush(ctx, b)
 	case Twalk:
-		return s.SrvRwalk(b)
+		return s.SrvRwalk(ctx, b)
 	case Topen:
-		return s.SrvRopen(b)
+		return s.SrvRopen(ctx, b)
 	case Tcreate:
-		return s.SrvRcreate(b)
+		return s.SrvRcreate(ctx, b)
 	case Tclunk:
-		return s.SrvRclunk(b)
+		return s.SrvRclunk(ctx, b)
 	case Tstat:
-		return s.SrvRstat(b)
+		return s.SrvRstat(ctx, b)
 	case Twstat:
-		return s.SrvRwstat(b)
+		return s.SrvRwstat(ctx, b)
 	case Tremove:
-		return s.SrvRremove(b)
+		return s.SrvRremove(ctx, b)
 	case Tread:
-		return s.SrvRread(b)
+		return s.SrvRread(ctx, b)
 	case Twrite:
-		return s.SrvRwrite(b)
+		return s.SrvRwrite(ctx, b)
 	}
 
 	// This has been tested by removing Attach from the switch.
