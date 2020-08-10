@@ -65,7 +65,7 @@ func createTestImage() *bytes.Buffer {
 }
 
 func TestReadArchive(t *testing.T) {
-	arch, err := ReadImage(createTestImage())
+	arch, err := ReadImageGz(createTestImage())
 	if err != nil {
 		t.Fatal(err)
 	}

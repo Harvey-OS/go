@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path"
 	"sync"
 
 	"harvey-os.org/ninep/protocol"
@@ -314,13 +315,20 @@ func main() {
 		flag.Usage()
 	}
 	pkg := a[0]
-	pkfFile, err := os.Open(pkg)
+	pkgFile, err := os.Open(pkg)
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer pkfFile.Close()
+	defer pkgFile.Close()
 
-	arch, err := tmpfs.ReadImage(pkfFile)
+	var arch *tmpfs.Archive
+	pkgExt := path.Ext(pkg)
+	if pkgExt == ".tgz" || pkgExt == ".gz" {
+		arch, err = tmpfs.ReadImageGz(pkgFile)
+	} else if pkgExt == ".cpio" {
+		arch, err = tmpfs.ReadImageCpio(pkgFile)
+	}
+
 	if err != nil {
 		log.Fatal(err)
 	}

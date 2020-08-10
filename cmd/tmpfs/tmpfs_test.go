@@ -18,7 +18,7 @@ func print(f string, args ...interface{}) {
 }
 
 // Create and add some files to the archive.
-func createTestImage(t *testing.T, base int) *bytes.Buffer {
+func createTestImageGz(t *testing.T, base int) *bytes.Buffer {
 	var buf bytes.Buffer
 
 	gztw := gzip.NewWriter(&buf)
@@ -68,7 +68,7 @@ func createTestImage(t *testing.T, base int) *bytes.Buffer {
 
 func TestReadImage(t *testing.T) {
 	tmpfs.Debug = t.Logf
-	_, err := tmpfs.ReadImage(createTestImage(t, 0))
+	_, err := tmpfs.ReadImageGz(createTestImageGz(t, 0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,7 +76,7 @@ func TestReadImage(t *testing.T) {
 
 func TestReadImageBig(t *testing.T) {
 	tmpfs.Debug = t.Logf
-	_, err := tmpfs.ReadImage(createTestImage(t, 1048576))
+	_, err := tmpfs.ReadImageGz(createTestImageGz(t, 1048576))
 	if err != nil {
 		t.Fatal(err)
 	}
