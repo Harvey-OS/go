@@ -46,10 +46,10 @@ var dry = flag.Bool("dryrun", true, "don't really do it")
 
 func gencode(w io.Writer, n, t string, m []byte, start, end uint64) {
 	fmt.Fprintf(os.Stderr, "Write %v %v start %v end %v\n", n, t, start, end)
-	fmt.Fprintf(w, "u64 %v_%v_start = %#x;\n", n, t, start)
-	fmt.Fprintf(w, "u64 %v_%v_end = %#x;\n", n, t, end)
-	fmt.Fprintf(w, "u64 %v_%v_len = %#x;\n", n, t, end-start)
-	fmt.Fprintf(w, "u8 %v_%v_out[] = {\n", n, t)
+	fmt.Fprintf(w, "int %v_%v_start = %#x;\n", n, t, start)
+	fmt.Fprintf(w, "int %v_%v_end = %#x;\n", n, t, end)
+	fmt.Fprintf(w, "int %v_%v_len = %#x;\n", n, t, end-start)
+	fmt.Fprintf(w, "uint8_t %v_%v_out[] = {\n", n, t)
 	for i := uint64(start); i < end; i += 16 {
 		for j := uint64(0); i+j < end && j < 16; j++ {
 			fmt.Fprintf(w, "%#02x, ", m[j+i])
@@ -68,6 +68,7 @@ func main() {
 			fmt.Printf("%v %v\n", n, err)
 			continue
 		}
+		datafound, codefound := false, false
 		var dataend, codeend, end uint64
 		var datastart, codestart, start uint64
 		datastart, codestart, start = math.MaxUint64, math.MaxUint64, math.MaxUint64
@@ -107,6 +108,7 @@ func main() {
 					codeend = curend
 				}
 				fmt.Fprintf(os.Stderr, "code s %v e %v\n", codestart, codeend)
+				codefound = true
 			} else {
 				if curstart < datastart {
 					datastart = curstart
@@ -115,6 +117,7 @@ func main() {
 					dataend = curend
 				}
 				fmt.Fprintf(os.Stderr, "data s %v e %v\n", datastart, dataend)
+				datafound = true
 			}
 			for i := uint64(0); i < v.Filesz; i++ {
 				if amt, err := v.ReadAt(mem[v.Vaddr+i:], int64(i)); err != nil && err != io.EOF {
@@ -135,9 +138,13 @@ func main() {
 		}
 		fmt.Fprintf(os.Stderr, "gencode\n")
 		_, file := path.Split(n)
-		fmt.Fprintf(w, "uintptr_t %v_main = %v;\n", n, f.Entry)
-		gencode(w, file, "code", mem, codestart, codeend)
-		gencode(w, file, "data", mem, datastart, dataend)
+		fmt.Fprintf(w, "uintptr_t %v_main = %#x;\n", n, f.Entry)
+		if codefound {
+			gencode(w, file, "code", mem, codestart, codeend)
+		}
+		if datafound {
+			gencode(w, file, "data", mem, datastart, dataend)
+		}
 	}
 	if err := ioutil.WriteFile(a[0], w.Bytes(), 0444); err != nil {
 		fmt.Fprintf(os.Stderr, "elf2c: write %s failed: %v\n", a[0], err)
