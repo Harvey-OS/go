@@ -20,7 +20,6 @@ import (
 	"time"
 
 	"github.com/insomniacslk/dhcp/dhcpv4"
-	"github.com/insomniacslk/dhcp/dhcpv4/bsdp"
 	"github.com/insomniacslk/dhcp/dhcpv4/server4"
 	"github.com/insomniacslk/dhcp/dhcpv6"
 	"github.com/insomniacslk/dhcp/dhcpv6/server6"
@@ -100,18 +99,12 @@ func (s *dserver4) dhcpHandler(conn net.PacketConn, peer net.Addr, m *dhcpv4.DHC
 		dhcpv4.WithOption(dhcpv4.OptIPAddressLeaseTime(dhcpv4.MaxLeaseTime)),
 	}
 	if *raspi {
+		// Add option 43, suboption 9 (PXE native boot menu) to allow Raspberry Pi to recognise the offer
+		subOpt9 := dhcpv4.OptGeneric(dhcpv4.GenericOptionCode(9), []byte("Raspberry Pi Boot"))
+		opt43 := dhcpv4.OptGeneric(dhcpv4.OptionVendorSpecificInformation, dhcpv4.OptionsFromList(subOpt9).ToBytes())
 		modifiers = append(modifiers,
 			dhcpv4.WithOption(dhcpv4.OptClassIdentifier("PXEClient")),
-			// Add option 43, suboption 9 (PXE native boot menu) to allow Raspberry Pi to recognise the offer
-			dhcpv4.WithOption(dhcpv4.Option{
-				Code: dhcpv4.OptionVendorSpecificInformation,
-				Value: bsdp.VendorOptions{Options: dhcpv4.OptionsFromList(
-					// The dhcp package only seems to support Apple BSDP boot menu items,
-					// so we have to craft the option by hand.
-					// \x11 is the length of the 'Raspberry Pi Boot' string...
-					dhcpv4.OptGeneric(dhcpv4.GenericOptionCode(9), []byte("\000\000\x11Raspberry Pi Boot")),
-				)},
-			}),
+			dhcpv4.WithOption(opt43),
 		)
 	}
 	if len(s.dns) != 0 {
