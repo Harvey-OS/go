@@ -212,7 +212,7 @@ func (s *dserver6) dhcpHandler(conn net.PacketConn, peer net.Addr, m dhcpv6.DHCP
 	log.Printf("DHCPv6 request successfully handled, reply: %v", reply.Summary())
 }
 
-func dhcpServe(inf string, dns []net.IP, wg sync.WaitGroup) error {
+func dhcpServe(inf string, dns []net.IP, wg *sync.WaitGroup) error {
 	centre, _, err := lookupIP(*hostFile, "centre")
 	var ip net.IP
 	if err != nil {
