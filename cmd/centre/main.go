@@ -120,7 +120,7 @@ func main() {
 	}
 
 	if *inf != "" {
-		if err := dhcpServe(*inf, dns, wg); err != nil {
+		if err := dhcpServe(*inf, dns, &wg); err != nil {
 			log.Fatal(err)
 		}
 	}
