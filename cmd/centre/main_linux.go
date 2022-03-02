@@ -12,6 +12,7 @@ import (
 	"math"
 	"net"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -62,11 +63,19 @@ func (s *dserver4) dhcpHandler(conn net.PacketConn, peer net.Addr, m *dhcpv4.DHC
 		return
 	}
 
-	ip, hostnames, err := lookupIP(s.hostFile, fmt.Sprintf("u%s", m.ClientHWAddr))
-	if err != nil || ip.IsUnspecified() {
-		log.Printf("Not responding to DHCP request for mac %s", m.ClientHWAddr)
-		log.Printf("You can create a host entry of the form 'a.b.c.d [names] u%s' 'ip6addr [names] u%s'if you wish", m.ClientHWAddr, m.ClientHWAddr)
-		return
+	macHost := fmt.Sprintf("u%s", strings.Replace(m.ClientHWAddr.String(), ":", "", -1))
+	oldStyle := fmt.Sprintf("u%s", m.ClientHWAddr)
+	ip, hostnames, err := lookupIP(s.hostFile, oldStyle)
+	if err == nil {
+		log.Printf("WARNING: old style hostname found: %s: please replace with new style: %s.", oldStyle, macHost)
+		log.Printf("WARNING: support for old style names will end Sep 1, 2022")
+	} else {
+		ip, hostnames, err = lookupIP(s.hostFile, macHost)
+		if err != nil || ip.IsUnspecified() {
+			log.Printf("Not responding to DHCP request for mac %s", m.ClientHWAddr)
+			log.Printf("You can create a host entry of the form 'a.b.c.d [names] %s' 'ip6addr [names] u%s'if you wish", macHost, macHost)
+			return
+		}
 	}
 
 	// Since this is dserver4, we force it to be an ip4 address.
