@@ -106,6 +106,7 @@ func main() {
 		go func() {
 			defer wg.Done()
 			http.Handle("/", http.FileServer(http.Dir(*httpDir)))
+			log.Println("starting HTTP server")
 			log.Fatal(http.ListenAndServe(fmt.Sprintf(":%d", *httpPort), nil))
 		}()
 	}
