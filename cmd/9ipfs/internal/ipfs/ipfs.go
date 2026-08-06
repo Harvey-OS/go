@@ -13,37 +13,49 @@ import (
 	"strings"
 	"sync"
 
+	files "github.com/ipfs/boxo/files"
+	icorepath "github.com/ipfs/boxo/path"
 	"github.com/ipfs/go-cid"
-	config "github.com/ipfs/go-ipfs-config"
-	files "github.com/ipfs/go-ipfs-files"
-	libp2p "github.com/ipfs/go-ipfs/core/node/libp2p"
-	icore "github.com/ipfs/interface-go-ipfs-core"
-	"github.com/ipfs/interface-go-ipfs-core/options"
-	icorepath "github.com/ipfs/interface-go-ipfs-core/path"
+	config "github.com/ipfs/kubo/config"
+	"github.com/ipfs/kubo/core"
+	"github.com/ipfs/kubo/core/coreapi"
+	icore "github.com/ipfs/kubo/core/coreiface"
+	"github.com/ipfs/kubo/core/coreiface/options"
+	libp2p "github.com/ipfs/kubo/core/node/libp2p"
+	"github.com/ipfs/kubo/plugin/loader" // This package is needed so that all the preloaded plugins are loaded automatically
+	"github.com/ipfs/kubo/repo/fsrepo"
+	"github.com/libp2p/go-libp2p/core/peer"
 	ma "github.com/multiformats/go-multiaddr"
+)
 
-	"github.com/ipfs/go-ipfs/core"
-	"github.com/ipfs/go-ipfs/core/coreapi"
-	"github.com/ipfs/go-ipfs/plugin/loader" // This package is needed so that all the preloaded plugins are loaded automatically
-	"github.com/ipfs/go-ipfs/repo/fsrepo"
-	"github.com/libp2p/go-libp2p-core/peer"
+// Plugin registration is process-global state in kubo's loader package, so
+// it must only happen once even if multiple IPFS nodes are spawned in the
+// same process (e.g. across tests).
+var (
+	pluginsOnce sync.Once
+	pluginsErr  error
 )
 
 func setupPlugins(externalPluginsPath string) error {
-	// Load any external plugins if available on externalPluginsPath
-	plugins, err := loader.NewPluginLoader(filepath.Join(externalPluginsPath, "plugins"))
-	if err != nil {
-		return fmt.Errorf("error loading plugins: %s", err)
-	}
+	pluginsOnce.Do(func() {
+		// Load any external plugins if available on externalPluginsPath
+		plugins, err := loader.NewPluginLoader(filepath.Join(externalPluginsPath, "plugins"))
+		if err != nil {
+			pluginsErr = fmt.Errorf("error loading plugins: %s", err)
+			return
+		}
 
-	// Load preloaded and external plugins
-	if err := plugins.Initialize(); err != nil {
-		return fmt.Errorf("error initializing plugins: %s", err)
-	}
-	if err := plugins.Inject(); err != nil {
-		return fmt.Errorf("error initializing plugins: %s", err)
-	}
-	return nil
+		// Load preloaded and external plugins
+		if err := plugins.Initialize(); err != nil {
+			pluginsErr = fmt.Errorf("error initializing plugins: %s", err)
+			return
+		}
+		if err := plugins.Inject(); err != nil {
+			pluginsErr = fmt.Errorf("error initializing plugins: %s", err)
+			return
+		}
+	})
+	return pluginsErr
 }
 
 func createTempRepo(ctx context.Context, repoPath string) (string, error) {
@@ -274,11 +286,17 @@ func (ipfs *IPFS) Root() *DirEntry {
 }
 
 func (ipfs *IPFS) walkRoot(ctx context.Context, name string) (*DirEntry, error) {
-	resolved, err := ipfs.core.ResolvePath(ctx, icorepath.New(name))
+	// name is a single path component (see Walk), typically a bare CID; the
+	// path parser requires a namespace prefix.
+	p, err := icorepath.NewPath("/ipfs/" + name)
 	if err != nil {
 		return nil, err
 	}
-	name = resolved.Cid().String() // normalize
+	resolved, _, err := ipfs.core.ResolvePath(ctx, p)
+	if err != nil {
+		return nil, err
+	}
+	name = resolved.RootCid().String() // normalize
 	node, err := ipfs.core.Unixfs().Get(ctx, resolved)
 	if err != nil {
 		return nil, err
@@ -287,7 +305,7 @@ func (ipfs *IPFS) walkRoot(ctx context.Context, name string) (*DirEntry, error) 
 
 	f := &DirEntry{
 		Name:   name,
-		Cid:    resolved.Cid(),
+		Cid:    resolved.RootCid(),
 		Size:   0,
 		Type:   nodeType(node),
 		Parent: nil,
@@ -309,13 +327,16 @@ func (ipfs *IPFS) Walk(ctx context.Context, f *DirEntry, name string) (*DirEntry
 	if f == ipfs.root {
 		return ipfs.walkRoot(ctx, name)
 	}
-	path := icorepath.Join(icorepath.New(f.Cid.String()), name)
-	resolved, err := ipfs.core.ResolvePath(ctx, path)
+	p, err := icorepath.Join(icorepath.FromCid(f.Cid), name)
 	if err != nil {
 		return nil, err
 	}
-	if resolved.Remainder() != "" {
-		return nil, fmt.Errorf("could not fully resolve path %v", path)
+	resolved, remainder, err := ipfs.core.ResolvePath(ctx, p)
+	if err != nil {
+		return nil, err
+	}
+	if len(remainder) != 0 {
+		return nil, fmt.Errorf("could not fully resolve path %v", p)
 	}
 	node, err := ipfs.core.Unixfs().Get(ctx, resolved)
 	if err != nil {
@@ -325,7 +346,7 @@ func (ipfs *IPFS) Walk(ctx context.Context, f *DirEntry, name string) (*DirEntry
 
 	return &DirEntry{
 		Name:   name,
-		Cid:    resolved.Cid(),
+		Cid:    resolved.RootCid(),
 		Size:   0,
 		Type:   nodeType(node),
 		Parent: f,
@@ -336,7 +357,7 @@ func (ipfs *IPFS) GetFile(ctx context.Context, f *DirEntry) (files.File, error) 
 	if f.Type != icore.TFile {
 		return nil, errors.New("not a regular file")
 	}
-	node, err := ipfs.core.Unixfs().Get(ctx, icorepath.New(f.Cid.String()))
+	node, err := ipfs.core.Unixfs().Get(ctx, icorepath.FromCid(f.Cid))
 	if err != nil {
 		return nil, err
 	}
@@ -350,13 +371,12 @@ func (ipfs *IPFS) ReadDir(ctx context.Context, f *DirEntry) ([]DirEntry, error) 
 	if f == ipfs.root {
 		return nil, nil
 	}
-	ch, err := ipfs.core.Unixfs().Ls(ctx, icorepath.New(f.Cid.String()), options.Unixfs.ResolveChildren(true))
-	if err != nil {
-		return nil, err
-	}
-	files := make([]DirEntry, 0)
-	for entry := range ch {
-		files = append(files, DirEntry{
+	entries := make([]DirEntry, 0)
+	for entry, err := range icore.LsIter(ctx, ipfs.core.Unixfs(), icorepath.FromCid(f.Cid), options.Unixfs.ResolveChildren(true)) {
+		if err != nil {
+			return nil, err
+		}
+		entries = append(entries, DirEntry{
 			Name:   entry.Name,
 			Cid:    entry.Cid,
 			Size:   entry.Size,
@@ -364,7 +384,7 @@ func (ipfs *IPFS) ReadDir(ctx context.Context, f *DirEntry) ([]DirEntry, error) 
 			Parent: f,
 		})
 	}
-	return files, nil
+	return entries, nil
 }
 
 func (ipfs *IPFS) Put(ctx context.Context, filename string) (*DirEntry, error) {
@@ -384,7 +404,7 @@ func (ipfs *IPFS) Put(ctx context.Context, filename string) (*DirEntry, error) {
 	}
 	e := &DirEntry{
 		Name:   filepath.Base(filename),
-		Cid:    resolved.Cid(),
+		Cid:    resolved.RootCid(),
 		Size:   uint64(size),
 		Type:   nodeType(node),
 		Parent: nil,

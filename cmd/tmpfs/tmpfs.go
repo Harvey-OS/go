@@ -1,3 +1,4 @@
+//go:build go1.14
 // +build go1.14
 
 package main
@@ -15,6 +16,7 @@ import (
 	"sync"
 
 	"github.com/ulikunitz/xz/lzma"
+	"harvey-os.org/ninep"
 	"harvey-os.org/ninep/protocol"
 	"harvey-os.org/ninep/tmpfs"
 	"harvey-os.org/sys"
@@ -32,11 +34,12 @@ var (
 // These strings are used by linux to map to particular error codes.
 // (See net/9p/error.c in the Linux code)
 const (
-	ErrorAuthFailed   = "authentication failed"
-	ErrorReadOnlyFs   = "Read-only file system"
-	ErrorFileNotFound = "file not found"
-	ErrorFidInUse     = "fid already in use"
-	ErrorFidNotFound  = "fid unknown or out of range"
+	ErrorAuthFailed       = "authentication failed"
+	ErrorReadOnlyFs       = "Read-only file system"
+	ErrorFileNotFound     = "file not found"
+	ErrorFidInUse         = "fid already in use"
+	ErrorFidNotFound      = "fid unknown or out of range"
+	ErrorPermissionDenied = "permission denied"
 )
 
 type fileServer struct {
@@ -165,7 +168,9 @@ func (fs *fileServer) Ropen(fid protocol.FID, mode protocol.Mode) (protocol.QID,
 		return protocol.QID{}, 0, fmt.Errorf(ErrorFileNotFound)
 	}
 
-	// TODO Check executable
+	if mode&3 == protocol.OEXEC && f.P9Dir(f.uname).Mode&protocol.DMEXEC == 0 {
+		return protocol.QID{}, 0, fmt.Errorf(ErrorPermissionDenied)
+	}
 
 	return f.Qid(), fs.ioUnit, nil
 }
@@ -239,7 +244,12 @@ func (fs *fileServer) Rread(fid protocol.FID, o protocol.Offset, c protocol.Coun
 				return b.Bytes(), nil
 			}
 			d9p := dir.Child(f.nextChildIdx).P9Dir(f.uname)
-			protocol.Marshaldir(b, *d9p)
+			// Marshaldir resets its buffer, so marshal into a
+			// scratch buffer and append rather than writing into
+			// the accumulator b directly.
+			var tmp bytes.Buffer
+			protocol.Marshaldir(&tmp, *d9p)
+			b.Write(tmp.Bytes())
 
 			// Seen on linux clients: sometimes the math is wrong and
 			// they end up asking for the last element with not enough data.
@@ -248,10 +258,6 @@ func (fs *fileServer) Rread(fid protocol.FID, o protocol.Offset, c protocol.Coun
 				log.Printf("Warning: Server bug? %v, need %d bytes;count is %d: skipping", d9p, b.Len(), c)
 				return nil, nil
 			}
-			// TODO handle more than one entry at a time
-			// We're not quite doing the array right.
-			// What does work is returning one thing so, for now, do that.
-			return b.Bytes(), nil
 		}
 
 	} else if file, ok := f.Entry.(*tmpfs.File); ok {
@@ -371,12 +377,13 @@ func main() {
 	}
 
 	nsCreator := func() protocol.NineServer {
-		return &fileServer{archive: arch, files: make(map[protocol.FID]*FidEntry), ioUnit: 1 * 1024 * 1024}
+		fs := &fileServer{archive: arch, files: make(map[protocol.FID]*FidEntry), ioUnit: 1 * 1024 * 1024}
+		if *debug {
+			return &ninep.DebugFileServer{FileServer: fs}
+		}
+		return fs
 	}
 
-	// TODO: get the tracing back in.
-	// The ninep package was from a long time ago and it's
-	// awkward at best.
 	if *addr != "" {
 		ln, err := net.Listen(*network, *addr)
 		if err != nil {

@@ -1,0 +1,8 @@
+# OS cruft
+.DS_Store
+
+# Go build/test artifacts (compiled command binaries are ignored per-directory,
+# e.g. cmd/centre/.gitignore)
+*.test
+*.out
+*.prof

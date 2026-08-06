@@ -1,3 +1,4 @@
+//go:build plan9
 // +build plan9
 
 package main
@@ -7,6 +8,7 @@ import (
 	"os"
 	"testing"
 
+	"harvey-os.org/ninep"
 	"harvey-os.org/ninep/protocol"
 	"harvey-os.org/ninep/tmpfs"
 	"harvey-os.org/sys"
@@ -25,10 +27,7 @@ func TestNwTmpfs(t *testing.T) {
 
 	fs := &fileServer{archive: arch, files: make(map[protocol.FID]*FidEntry), ioUnit: 1 * 1024 * 1024}
 
-	// TODO: get the tracing back in.
-	// The ninep package was from a long time ago and it's
-	// awkward at best.
-	protocol.ServeFromRWC(os.NewFile(uintptr(fd), *srv), fs, *srv)
+	protocol.ServeFromRWC(os.NewFile(uintptr(fd), *srv), &ninep.DebugFileServer{FileServer: fs}, *srv)
 }
 
 func TestMount(t *testing.T) {
@@ -44,10 +43,7 @@ func TestMount(t *testing.T) {
 
 	fs := &fileServer{archive: arch, files: make(map[protocol.FID]*FidEntry), ioUnit: 1 * 1024 * 1024}
 
-	// TODO: get the tracing back in.
-	// The ninep package was from a long time ago and it's
-	// awkward at best.
-	protocol.ServeFromRWC(os.NewFile(uintptr(fd), *srv), fs, *srv)
+	protocol.ServeFromRWC(os.NewFile(uintptr(fd), *srv), &ninep.DebugFileServer{FileServer: fs}, *srv)
 
 	f, err := os.OpenFile(*srv, os.O_RDWR, 0)
 	if err != nil {

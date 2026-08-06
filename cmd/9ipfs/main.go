@@ -18,7 +18,7 @@ import (
 	"os"
 	"sync"
 
-	icore "github.com/ipfs/interface-go-ipfs-core"
+	icore "github.com/ipfs/kubo/core/coreiface"
 	"harvey-os.org/cmd/9ipfs/internal/ipfs"
 	"harvey-os.org/ninep"
 	"harvey-os.org/ninep/protocol"
@@ -35,6 +35,7 @@ var (
 )
 
 // These errors try to match those used in Plan 9. See:
+//
 //	/sys/src/lib9p/srv.c
 //	/sys/src/9/port/error.h
 var (
@@ -185,7 +186,9 @@ func (fs *fileServer) Ropen(fid protocol.FID, mode protocol.Mode) (protocol.QID,
 		return protocol.QID{}, 0, ErrFileNotFound
 	}
 
-	// TODO Check executable
+	if mode&3 == protocol.OEXEC && plan9Dir(f).Mode&protocol.DMEXEC == 0 {
+		return protocol.QID{}, 0, ErrPermission
+	}
 
 	return getQid(f), fs.ioUnit, nil
 }
@@ -274,7 +277,13 @@ func (fs *fileServer) Rread(fid protocol.FID, offset protocol.Offset, count prot
 			return nil, err
 		}
 		defer file.Close()
-		if _, err := file.Seek(int64(offset), 0); err != nil {
+		// Not all File implementations support seeking (e.g. HTTP multipart
+		// streams), so type-assert rather than assume.
+		seeker, ok := file.(io.Seeker)
+		if !ok {
+			return nil, fmt.Errorf("file %v does not support seeking", fid)
+		}
+		if _, err := seeker.Seek(int64(offset), 0); err != nil {
 			return nil, err
 		}
 		b := make([]byte, count)
