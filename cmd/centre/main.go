@@ -15,6 +15,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 
@@ -24,8 +25,8 @@ import (
 )
 
 var (
-	// TODO: get info from centre ipv4
-	inf        = flag.String("i", "eth0", "Interface to serve DHCPv4 on")
+	// Empty default means auto-detect: see defaultInterface.
+	inf        = flag.String("i", "", "Interface to serve DHCPv4 on (default: auto-detect from the 'centre' hostfile entry)")
 	dnsServers = flag.String("dns", "", "Comma-separated list of DNS servers for DHCPv4")
 
 	// File serving
@@ -36,7 +37,49 @@ var (
 	ninepDir   = flag.String("ninep-dir", "", "Directory to serve over 9p")
 	ninepAddr  = flag.String("ninep-addr", ":5640", "addr to serve 9p on")
 	ninepDebug = flag.Int("ninep-debug", 0, "Debug level for ninep -- for now, only non-zero matters")
+	hostFile   = flag.String("hostfile", "", "Optional additional hosts file for DHCPv4/DHCPv6")
 )
+
+// defaultInterface picks the interface bound to the 'centre' hostfile entry's
+// IP, falling back to a per-OS default if there is no such entry or interface.
+func defaultInterface() string {
+	if ip, _, err := lookupIP(*hostFile, "centre"); err == nil {
+		if name, err := interfaceForIP(ip); err == nil {
+			return name
+		}
+	}
+	if runtime.GOOS == "darwin" {
+		return "en0"
+	}
+	return "eth0"
+}
+
+// interfaceForIP returns the name of the interface holding the given IP.
+func interfaceForIP(ip net.IP) (string, error) {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return "", err
+	}
+	for _, iface := range ifaces {
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, addr := range addrs {
+			var addrIP net.IP
+			switch v := addr.(type) {
+			case *net.IPNet:
+				addrIP = v.IP
+			case *net.IPAddr:
+				addrIP = v.IP
+			}
+			if addrIP != nil && addrIP.Equal(ip) {
+				return iface.Name, nil
+			}
+		}
+	}
+	return "", fmt.Errorf("no interface found with IP %v", ip)
+}
 
 // lookupIP looks up an IP address corresponding to the given name.
 // It also returns a slice of other hostnames it found for the same IP.
@@ -119,14 +162,17 @@ func main() {
 		}
 	}
 
+	if *inf == "" {
+		*inf = defaultInterface()
+	}
 	if *inf != "" {
 		if err := dhcpServe(*inf, dns, &wg); err != nil {
 			log.Fatal(err)
 		}
 	}
-	// TODO: serve on ip6
 	if len(*ninepDir) != 0 {
-		ln, err := net.Listen("tcp4", *ninepAddr)
+		// "tcp", not "tcp4": also serve ip6 clients.
+		ln, err := net.Listen("tcp", *ninepAddr)
 		if err != nil {
 			log.Fatalf("Listen failed: %v", err)
 		}

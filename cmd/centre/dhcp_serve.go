@@ -2,6 +2,9 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
+//go:build linux || darwin
+// +build linux darwin
+
 package main
 
 import (
@@ -17,7 +20,6 @@ import (
 	"time"
 
 	"github.com/insomniacslk/dhcp/dhcpv4"
-	"github.com/insomniacslk/dhcp/dhcpv4/bsdp"
 	"github.com/insomniacslk/dhcp/dhcpv4/server4"
 	"github.com/insomniacslk/dhcp/dhcpv6"
 	"github.com/insomniacslk/dhcp/dhcpv6/server6"
@@ -31,7 +33,6 @@ var (
 	bootfilename = flag.String("bootfilename", "pxelinux.0", "Boot file to serve via DHCPv4")
 	raspi        = flag.Bool("raspi", false, "Configure to boot Raspberry Pi")
 	gateway      = flag.String("gw", "", "Optional gateway IP for DHCPv4")
-	hostFile     = flag.String("hostfile", "", "Optional additional hosts file for DHCPv4")
 
 	// DHCPv6-specific
 	ipv6           = flag.Bool("6", false, "DHCPv6 server")
@@ -102,19 +103,7 @@ func (s *dserver4) dhcpHandler(conn net.PacketConn, peer net.Addr, m *dhcpv4.DHC
 		modifiers = append(modifiers, dhcpv4.WithOption(dhcpv4.OptHostName(hostname)))
 	}
 	if *raspi {
-		modifiers = append(modifiers,
-			dhcpv4.WithOption(dhcpv4.OptClassIdentifier("PXEClient")),
-			// Add option 43, suboption 9 (PXE native boot menu) to allow Raspberry Pi to recognise the offer
-			dhcpv4.WithOption(dhcpv4.Option{
-				Code: dhcpv4.OptionVendorSpecificInformation,
-				Value: bsdp.VendorOptions{Options: dhcpv4.OptionsFromList(
-					// The dhcp package only seems to support Apple BSDP boot menu items,
-					// so we have to craft the option by hand.
-					// \x11 is the length of the 'Raspberry Pi Boot' string...
-					dhcpv4.OptGeneric(dhcpv4.GenericOptionCode(9), []byte("\000\000\x11Raspberry Pi Boot")),
-				)},
-			}),
-		)
+		modifiers = append(modifiers, raspiModifiers()...)
 	}
 	if len(s.dns) != 0 {
 		modifiers = append(modifiers, dhcpv4.WithDNS(s.dns...))
@@ -162,8 +151,8 @@ func (s *dserver4) dhcpHandler(conn net.PacketConn, peer net.Addr, m *dhcpv4.DHC
 
 type dserver6 struct {
 	mac         net.HardwareAddr
-	yourIP      net.IP
 	bootfileurl string
+	hostFile    string
 }
 
 func (s *dserver6) dhcpHandler(conn net.PacketConn, peer net.Addr, m dhcpv6.DHCPv6) {
@@ -183,11 +172,20 @@ func (s *dserver6) dhcpHandler(conn net.PacketConn, peer net.Addr, m dhcpv6.DHCP
 		log.Printf("Only accept requests with rapid commit option.")
 		return
 	}
-	if mac, err := dhcpv6.ExtractMAC(msg); err != nil {
+	mac, err := dhcpv6.ExtractMAC(msg)
+	if err != nil {
 		log.Printf("No MAC address in request: %v", err)
 		return
-	} else if s.mac != nil && !bytes.Equal(s.mac, mac) {
+	}
+	if s.mac != nil && !bytes.Equal(s.mac, mac) {
 		log.Printf("MAC address %s doesn't match expected MAC %s", mac, s.mac)
+		return
+	}
+
+	macHost := fmt.Sprintf("u%s", strings.Replace(mac.String(), ":", "", -1))
+	ip, _, err := lookupIP(s.hostFile, macHost)
+	if err != nil || ip.To4() != nil {
+		log.Printf("Not responding to DHCPv6 request for mac %s: no AAAA host entry", mac)
 		return
 	}
 
@@ -203,7 +201,7 @@ func (s *dserver6) dhcpHandler(conn net.PacketConn, peer net.Addr, m dhcpv6.DHCP
 	iana := msg.Options.OneIANA()
 	if iana != nil {
 		iana.Options.Update(&dhcpv6.OptIAAddress{
-			IPv6Addr:          s.yourIP,
+			IPv6Addr:          ip,
 			PreferredLifetime: math.MaxUint32 * time.Second,
 			ValidLifetime:     math.MaxUint32 * time.Second,
 		})
@@ -257,20 +255,20 @@ func dhcpServe(inf string, dns []net.IP, wg *sync.WaitGroup) error {
 		}()
 	}
 
-	// not yet.
-	if false && *ipv6 && inf != "" {
+	if *ipv6 && inf != "" {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 
 			s := &dserver6{
 				bootfileurl: *v6Bootfilename,
+				hostFile:    *hostFile,
 			}
 			laddr := &net.UDPAddr{
 				IP:   net.IPv6unspecified,
 				Port: dhcpv6.DefaultServerPort,
 			}
-			server, err := server6.NewServer("eth0", laddr, s.dhcpHandler)
+			server, err := server6.NewServer(inf, laddr, s.dhcpHandler)
 			if err != nil {
 				log.Fatal(err)
 			}
